@@ -141,14 +141,15 @@ class TestCase(unittest.TestCase):
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.level = logging.DEBUG
-        self.logger.info("Cosmo test setUp() called")
+        self.logger.debug("Cosmo test setUp() called")
         chars = string.ascii_uppercase + string.digits
         self.name_prefix = 'cosmo_test_{0}_'\
             .format(''.join(random.choice(chars) for x in range(PREFIX_RANDOM_CHARS)))
         self.timeout = 120
+        self.logger.debug("Cosmo test setUp() done")
 
     def tearDown(self):
-        self.logger.info("Cosmo test tearDown() called")
+        self.logger.debug("Cosmo test tearDown() called")
         servers_list = self.get_nova_client().servers.list()
         for server in servers_list:
             if server.name.startswith(self.name_prefix):
@@ -162,4 +163,5 @@ class TestCase(unittest.TestCase):
                 self.logger.info("NOT deleting server with name "
                                  + server.name)
         NeutronClient().get().cosmo_delete_prefixed_objects(self.name_prefix)
+        self.logger.debug("Cosmo test tearDown() done")
 
