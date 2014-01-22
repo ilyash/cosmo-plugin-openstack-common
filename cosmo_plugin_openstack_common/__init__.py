@@ -1,19 +1,25 @@
 # vim: ts=4 sw=4 et
 
+from functools import wraps
 import logging
 import random
 import string
+import time
 import unittest
 
 import keystoneclient.v2_0.client as keystone_client
 import neutronclient.v2_0.client as neutron_client
+import neutronclient.common.exceptions as neutron_exceptions
 import novaclient.v1_1.client as nova_client
 
 import cosmo_plugin_common as cpc
 
 PREFIX_RANDOM_CHARS = 3
+CLEANUP_RETRIES = 10
+CLEANUP_RETRY_SLEEP = 2
 
 # Configs
+
 
 class KeystoneConfig(cpc.Config):
     which = 'keystone'
@@ -22,8 +28,10 @@ class KeystoneConfig(cpc.Config):
 class NeutronConfig(cpc.Config):
     which = 'neutron'
 
+
 class TestsConfig(cpc.Config):
     which = 'os_tests'
+
 
 class OpenStackClient(object):
     def get(self, *args, **kw):
@@ -71,60 +79,60 @@ class NeutronClient(OpenStackClient):
         return ret
 
 
+# Decorators
+
+def with_neutron_client(f):
+    @wraps(f)
+    def wrapper(*args, **kw):
+        neutron_client = NeutronClient().get()
+        kw['neutron_client'] = neutron_client
+        return f(*args, **kw)
+    return wrapper
+
 # Sugar for clients
 
 
 class NeutronClientWithSugar(neutron_client.Client):
 
     def __init__(self, *args, **kw):
-        ret = neutron_client.Client.__init__(self, *args, **kw)
-        # UNFINISHED
-        # for obj_type_single in 'router', 'network', 'subnet':
-        #   def f(obj_type_single):
-        #       return self.cosmo_list_objects_of_type(obj_type_single)
-        #   obj_type_plural = self.cosmo_plural(obj_type_single)
-        #   setattr(self, 'cosmo_list_' + obj_type_plural, f)
-        return ret
+        return neutron_client.Client.__init__(self, *args, **kw)
 
     def cosmo_plural(self, obj_type_single):
         return obj_type_single + 's'
 
-    def cosmo_list_objects_of_type_with_name(self, obj_type_single, name):
-        """ Sugar for list_XXXs()['XXXs'] """
-        obj_type_plural = self.cosmo_plural(obj_type_single)
-        for obj in getattr(self, 'list_' + obj_type_plural)(name=name)[obj_type_plural]:
-            yield obj
+    def cosmo_get_named(self, obj_type_single, name, **kw):
+        return self.cosmo_get(obj_type_single, name=name, **kw)
 
-    def cosmo_get_object_of_type_with_name(self, obj_type_single, name):
-        ls = list(self.cosmo_list_objects_of_type_with_name(obj_type_single, name))
+    def cosmo_get(self, obj_type_single, **kw):
+        ls = list(self.cosmo_list(obj_type_single, **kw))
         if len(ls) != 1:
             raise RuntimeError(
                 "Expected exactly one object of type {0} "
-                "with name {1} but there are {2}".format(
-                    obj_type_single, name, len(ls)))
+                "with match {1} but there are {2}".format(
+                    obj_type_single, kw, len(ls)))
         return ls[0]
 
 
-    def cosmo_list_objects_of_type(self, obj_type_single):
+    def cosmo_list(self, obj_type_single, **kw):
         """ Sugar for list_XXXs()['XXXs'] """
         obj_type_plural = self.cosmo_plural(obj_type_single)
-        for obj in getattr(self, 'list_' + obj_type_plural)()[obj_type_plural]:
+        for obj in getattr(self, 'list_' + obj_type_plural)(**kw)[obj_type_plural]:
             yield obj
 
-    def cosmo_list_prefixed_objects_of_type(self, obj_type_single, name_prefix):
-        for obj in self.cosmo_list_objects_of_type(obj_type_single):
+    def cosmo_list_prefixed(self, obj_type_single, name_prefix):
+        for obj in self.cosmo_list(obj_type_single):
             if obj['name'].startswith(name_prefix):
                 yield obj
 
-    def cosmo_delete_prefixed_objects(self, name_prefix):
+    def cosmo_delete_prefixed(self, name_prefix):
         # Cleanup all neutron.list_XXX() objects with names starting with self.name_prefix
-        for obj_type_single in 'router', 'network', 'subnet':
-            for obj in self.cosmo_list_prefixed_objects_of_type(obj_type_single, name_prefix):
+        for obj_type_single in 'port', 'router', 'network', 'subnet':
+            for obj in self.cosmo_list_prefixed(obj_type_single, name_prefix):
                 # self.logger.info("Deleting {0} {1}".format(obj_type_single, obj.get('name', obj['id'])))
                 getattr(self, 'delete_' + obj_type_single)(obj['id'])
 
 class TestCase(unittest.TestCase):
-    
+
     def get_nova_client(self):
         r = NovaClient().get()
         self.get_nova_client = lambda: r
@@ -162,6 +170,35 @@ class TestCase(unittest.TestCase):
             else:
                 self.logger.info("NOT deleting server with name "
                                  + server.name)
-        NeutronClient().get().cosmo_delete_prefixed_objects(self.name_prefix)
+        for i in range(1, CLEANUP_RETRIES+1):
+            try:
+                self.logger.debug(
+                    "Neutron resources cleanup attempt {0}/{1}"
+                    .format(i, CLEANUP_RETRIES)
+                )
+                NeutronClient().get().cosmo_delete_prefixed(self.name_prefix)
+                break
+            except neutron_exceptions.NetworkInUseClient:
+                pass
+            time.sleep(CLEANUP_RETRY_SLEEP)
         self.logger.debug("Cosmo test tearDown() done")
+
+    @with_neutron_client
+    def create_network(self, name_suffix, neutron_client):
+        return neutron_client.create_network({'network': {
+            'name': self.name_prefix + name_suffix, 'admin_state_up': True
+        }})['network']
+
+    @with_neutron_client
+    def create_subnet(self, name_suffix, cidr, neutron_client, network=None):
+        if not network:
+            network = self.create_network(name_suffix)
+        return neutron_client.create_subnet({
+            'subnet': {
+                'name': self.name_prefix + name_suffix,
+                'ip_version': 4,
+                'cidr': cidr,
+                'network_id': network['id']
+            }
+        })['subnet']
 
