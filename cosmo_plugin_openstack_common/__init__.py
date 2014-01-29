@@ -1,5 +1,6 @@
 # vim: ts=4 sw=4 et
 
+import collections
 from functools import wraps
 import logging
 import random
@@ -12,7 +13,13 @@ import neutronclient.v2_0.client as neutron_client
 import neutronclient.common.exceptions as neutron_exceptions
 import novaclient.v1_1.client as nova_client
 
+import cosmo.events
+
 import cosmo_plugin_common as cpc
+
+import cloudify.manager
+import cloudify.decorators
+with_logger = cloudify.decorators.with_logger
 
 PREFIX_RANDOM_CHARS = 3
 CLEANUP_RETRIES = 10
@@ -131,6 +138,38 @@ class NeutronClientWithSugar(neutron_client.Client):
                 # self.logger.info("Deleting {0} {1}".format(obj_type_single, obj.get('name', obj['id'])))
                 getattr(self, 'delete_' + obj_type_single)(obj['id'])
 
+# maybe move to plugins common - start
+
+class MockDeploymentNodesStorage(collections.defaultdict):
+    def __init__(self, logger):
+        self.logger = logger
+        return collections.defaultdict.__init__(self)
+
+    def __missing__(self, k):
+        self[k] = MockDeploymentNode(self.logger, k)
+        return self[k]
+
+class MockDeploymentNode(cloudify.manager.DeploymentNode):
+
+    def __init__(self, logger, __cloudify_id):
+        self.logger = logger
+        cloudify.manager.DeploymentNode.__init__(self, __cloudify_id)
+
+    def get(self, k):
+        self.logger.debug("MockDeploymentNode<{0}>.get('{1}')".format(self.id, k))
+        return cloudify.manager.DeploymentNode.get(self, k)
+
+    def put(self, k, v):
+        self.logger.debug("MockDeploymentNode<{0}>.put('{1}', '{2}')".format(self.id, k, v))
+        return cloudify.manager.DeploymentNode.put(self, k, v)
+
+    # Ensure no saves
+    def get_updated_properties(self):
+        return {}
+
+# maybe move to plugins common - end
+
+
 class TestCase(unittest.TestCase):
 
     def get_nova_client(self):
@@ -144,16 +183,30 @@ class TestCase(unittest.TestCase):
         return self.get_neutron_client()
 
 
-    def setUp(self):
+    def _mock_send_event(self, *args, **kw):
+        self.logger.debug("_mock_send_event(args={0}, kw={1})".format(args, kw))
+
+    def _mock_get_node_state(self, __cloudify_id, *args, **kw):
+        self.logger.debug("_mock_get_node_state(__cloudify_id={0} args={1}, kw={2})".format(__cloudify_id, args, kw))
+        return self.nodes_data[__cloudify_id]
+
+    @with_logger
+    def setUp(self, logger):
         logging.basicConfig(
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logger
         self.logger.level = logging.DEBUG
         self.logger.debug("Cosmo test setUp() called")
         chars = string.ascii_uppercase + string.digits
         self.name_prefix = 'cosmo_test_{0}_'\
             .format(''.join(random.choice(chars) for x in range(PREFIX_RANDOM_CHARS)))
         self.timeout = 120
+        cosmo.events._send_event = self._mock_send_event # WARNING: using implementation detail (cosmo.events._send_event)
+        cloudify.decorators.get_node_state = self._mock_get_node_state
+        cloudify.manager.get_node_state = self._mock_get_node_state
+        self.nodes_data = MockDeploymentNodesStorage(self.logger)
+
+
         self.logger.debug("Cosmo test setUp() done")
 
     def tearDown(self):
@@ -202,3 +255,15 @@ class TestCase(unittest.TestCase):
             }
         })['subnet']
 
+    @with_neutron_client
+    def assertThereIsOneAndGet(self, obj_type_single, neutron_client, **kw):
+        objs = list(neutron_client.cosmo_list(obj_type_single, **kw))
+        self.assertEquals(1, len(objs))
+        return objs[0]
+
+    assertThereIsOne = assertThereIsOneAndGet
+
+    @with_neutron_client
+    def assertThereIsNo(self, obj_type_single, neutron_client, **kw):
+        objs = list(neutron_client.cosmo_list(obj_type_single, **kw))
+        self.assertEquals(0, len(objs))
