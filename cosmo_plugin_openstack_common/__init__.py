@@ -1,5 +1,3 @@
-# vim: ts=4 sw=4 et
-
 import collections
 from functools import wraps
 import logging
@@ -140,28 +138,28 @@ class NeutronClientWithSugar(neutron_client.Client):
 
 # maybe move to plugins common - start
 
-class MockDeploymentNodesStorage(collections.defaultdict):
+class MockNodeStatesStorage(collections.defaultdict):
     def __init__(self, logger):
         self.logger = logger
         return collections.defaultdict.__init__(self)
 
     def __missing__(self, k):
-        self[k] = MockDeploymentNode(self.logger, k)
+        self[k] = MockNodeState(self.logger, k)
         return self[k]
 
-class MockDeploymentNode(cloudify.manager.DeploymentNode):
+class MockNodeState(cloudify.manager.NodeState):
 
     def __init__(self, logger, __cloudify_id):
         self.logger = logger
-        cloudify.manager.DeploymentNode.__init__(self, __cloudify_id)
+        cloudify.manager.NodeState.__init__(self, __cloudify_id)
 
     def get(self, k):
-        self.logger.debug("MockDeploymentNode<{0}>.get('{1}')".format(self.id, k))
-        return cloudify.manager.DeploymentNode.get(self, k)
+        self.logger.debug("MockNodeState<{0}>.get('{1}')".format(self.id, k))
+        return cloudify.manager.NodeState.get(self, k)
 
     def put(self, k, v):
-        self.logger.debug("MockDeploymentNode<{0}>.put('{1}', '{2}')".format(self.id, k, v))
-        return cloudify.manager.DeploymentNode.put(self, k, v)
+        self.logger.debug("MockNodeState<{0}>.put('{1}', '{2}')".format(self.id, k, v))
+        return cloudify.manager.NodeState.put(self, k, v)
 
     # Ensure no saves
     def get_updated_properties(self):
@@ -204,7 +202,7 @@ class TestCase(unittest.TestCase):
         cosmo.events._send_event = self._mock_send_event # WARNING: using implementation detail (cosmo.events._send_event)
         cloudify.decorators.get_node_state = self._mock_get_node_state
         cloudify.manager.get_node_state = self._mock_get_node_state
-        self.nodes_data = MockDeploymentNodesStorage(self.logger)
+        self.nodes_data = MockNodeStatesStorage(self.logger)
 
 
         self.logger.debug("Cosmo test setUp() done")
