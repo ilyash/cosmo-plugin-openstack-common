@@ -39,8 +39,12 @@ class TestsConfig(cpc.Config):
 
 
 class OpenStackClient(object):
-    def get(self, *args, **kw):
-        cfg = self.__class__.config().get()
+    def get(self, config=None, *args, **kw):
+        static_config = self.__class__.config().get()
+        cfg = {}
+        cfg.update(static_config)
+        if config:
+            cfg.update(config)
         ret = self.connect(cfg, *args, **kw)
         ret.format = 'json'
         return ret
@@ -76,7 +80,7 @@ class NeutronClient(OpenStackClient):
     config = NeutronConfig
 
     def connect(self, cfg):
-        ks = KeystoneClient().get()
+        ks = KeystoneClient().get(config = cfg.get('keystone_config'))
         # ret = neutron_client.Client('2.0', endpoint_url=cfg['url'], token=ks.auth_token)
         ret = NeutronClientWithSugar(endpoint_url=cfg['url'], token=ks.auth_token)
         # print(ret.cosmo_list_routers())
@@ -86,11 +90,36 @@ class NeutronClient(OpenStackClient):
 
 # Decorators
 
+def _find_instanceof_in_kw(cls, kw):
+    ret = [v for v in kw.values() if isinstance(v, cls)]
+    if len(ret) != 1:
+        raise RuntimeError(
+            "Expected to find exactly one instance of {0} in "
+            "kwargs but found {1}".format(cls, len(ret)))
+    return ret[0]
+
+def _find_context_in_kw(kw):
+    return _find_instanceof_in_kw(cloudify.context.CloudifyContext, kw)
+
 def with_neutron_client(f):
     @wraps(f)
     def wrapper(*args, **kw):
-        neutron_client = NeutronClient().get()
+        ctx = _find_context_in_kw(kw)
+        if ctx:
+            config = ctx.properties.get('neutron_config')
+        neutron_client = NeutronClient().get(config=config)
         kw['neutron_client'] = neutron_client
+        return f(*args, **kw)
+    return wrapper
+
+def with_nova_client(f):
+    @wraps(f)
+    def wrapper(*args, **kw):
+        ctx = _find_context_in_kw(kw)
+        if ctx:
+            config = ctx.properties.get('nova_config', {})
+        nova_client = NovaClient().get(config=config)
+        kw['nova_client'] = nova_client
         return f(*args, **kw)
     return wrapper
 
