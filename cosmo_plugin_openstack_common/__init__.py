@@ -11,13 +11,10 @@ import neutronclient.v2_0.client as neutron_client
 import neutronclient.common.exceptions as neutron_exceptions
 import novaclient.v1_1.client as nova_client
 
-import cosmo.events
-
 import cosmo_plugin_common as cpc
 
 import cloudify.manager
 import cloudify.decorators
-with_logger = cloudify.decorators.with_logger
 
 PREFIX_RANDOM_CHARS = 3
 CLEANUP_RETRIES = 10
@@ -92,7 +89,9 @@ class NeutronClient(OpenStackClient):
 
 def _find_instanceof_in_kw(cls, kw):
     ret = [v for v in kw.values() if isinstance(v, cls)]
-    if len(ret) != 1:
+    if not ret:
+        return None
+    if len(ret) > 1:
         raise RuntimeError(
             "Expected to find exactly one instance of {0} in "
             "kwargs but found {1}".format(cls, len(ret)))
@@ -107,6 +106,8 @@ def with_neutron_client(f):
         ctx = _find_context_in_kw(kw)
         if ctx:
             config = ctx.properties.get('neutron_config')
+        else:
+            config = None
         neutron_client = NeutronClient().get(config=config)
         kw['neutron_client'] = neutron_client
         return f(*args, **kw)
@@ -117,7 +118,9 @@ def with_nova_client(f):
     def wrapper(*args, **kw):
         ctx = _find_context_in_kw(kw)
         if ctx:
-            config = ctx.properties.get('nova_config', {})
+            config = ctx.properties.get('nova_config')
+        else:
+            config = None
         nova_client = NovaClient().get(config=config)
         kw['nova_client'] = nova_client
         return f(*args, **kw)
@@ -127,9 +130,6 @@ def with_nova_client(f):
 
 
 class NeutronClientWithSugar(neutron_client.Client):
-
-    def __init__(self, *args, **kw):
-        return neutron_client.Client.__init__(self, *args, **kw)
 
     def cosmo_plural(self, obj_type_single):
         return obj_type_single + 's'
@@ -160,41 +160,49 @@ class NeutronClientWithSugar(neutron_client.Client):
 
     def cosmo_delete_prefixed(self, name_prefix):
         # Cleanup all neutron.list_XXX() objects with names starting with self.name_prefix
-        for obj_type_single in 'port', 'router', 'network', 'subnet':
+        for obj_type_single in 'port', 'router', 'network', 'subnet', 'security_group':
             for obj in self.cosmo_list_prefixed(obj_type_single, name_prefix):
                 # self.logger.info("Deleting {0} {1}".format(obj_type_single, obj.get('name', obj['id'])))
+                if obj_type_single == 'router':
+                    ports = self.cosmo_list('port', device_id=obj['id'])
+                    for port in ports:
+                        try:
+                            self.remove_interface_router(port['device_id'], {'port_id': port['id']})
+                        except neutron_exceptions.NeutronClientException:
+                            pass
                 getattr(self, 'delete_' + obj_type_single)(obj['id'])
 
-# maybe move to plugins common - start
+    def cosmo_find_external_net(self):
+        """ For tests of floating IP """
+        nets = self.list_networks()['networks']
+        ls = [net for net in nets if net.get('router:external')]
+        if len(ls) == 1:
+            return ls[0]
+        if len(ls) != 1:
+            raise RuntimeError(
+                "Expected exactly one external network but found {0}".format(
+                    len(ls)))
 
-class MockNodeStatesStorage(collections.defaultdict):
-    def __init__(self, logger):
-        self.logger = logger
-        return collections.defaultdict.__init__(self)
 
-    def __missing__(self, k):
-        self[k] = MockNodeState(self.logger, k)
-        return self[k]
 
-class MockNodeState(cloudify.manager.NodeState):
+class TrackingNeutronClientWithSugar(NeutronClientWithSugar):
 
-    def __init__(self, logger, __cloudify_id):
-        self.logger = logger
-        cloudify.manager.NodeState.__init__(self, __cloudify_id)
+    _cosmo_undo = []  # Tuples of (func, args, kwargs) to run for cleanup
 
-    def get(self, k):
-        self.logger.debug("MockNodeState<{0}>.get('{1}')".format(self.id, k))
-        return cloudify.manager.NodeState.get(self, k)
+    def __init__(self, *args, **kw):
+        return super(TrackingNeutronClientWithSugar, self).__init__(*args, **kw)
 
-    def put(self, k, v):
-        self.logger.debug("MockNodeState<{0}>.put('{1}', '{2}')".format(self.id, k, v))
-        return cloudify.manager.NodeState.put(self, k, v)
+    def create_floatingip(self, *args, **kw):
+        ret = super(TrackingNeutronClientWithSugar, self).create_floatingip(*args, **kw)
+        self.__class__._cosmo_undo.append((self.delete_floatingip, (ret['floatingip']['id'],), {}))
+        return ret
 
-    # Ensure no saves
-    def get_updated_properties(self):
-        return {}
-
-# maybe move to plugins common - end
+    def cosmo_delete_tracked(self):
+        for f, args, kw in self.__class__._cosmo_undo:
+            try:
+                f(*args, **kw)
+            except neutron_exceptions.NeutronClientException:
+                pass
 
 
 class TestCase(unittest.TestCase):
@@ -217,8 +225,9 @@ class TestCase(unittest.TestCase):
         self.logger.debug("_mock_get_node_state(__cloudify_id={0} args={1}, kw={2})".format(__cloudify_id, args, kw))
         return self.nodes_data[__cloudify_id]
 
-    @with_logger
-    def setUp(self, logger):
+    def setUp(self):
+        globals()['NeutronClientWithSugar'] = TrackingNeutronClientWithSugar  # Careful!
+        logger = logging.getLogger(__name__)
         logging.basicConfig(
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         self.logger = logger
@@ -228,11 +237,6 @@ class TestCase(unittest.TestCase):
         self.name_prefix = 'cosmo_test_{0}_'\
             .format(''.join(random.choice(chars) for x in range(PREFIX_RANDOM_CHARS)))
         self.timeout = 120
-        cosmo.events._send_event = self._mock_send_event # WARNING: using implementation detail (cosmo.events._send_event)
-        cloudify.decorators.get_node_state = self._mock_get_node_state
-        cloudify.manager.get_node_state = self._mock_get_node_state
-        self.nodes_data = MockNodeStatesStorage(self.logger)
-
 
         self.logger.debug("Cosmo test setUp() done")
 
@@ -257,6 +261,7 @@ class TestCase(unittest.TestCase):
                     .format(i, CLEANUP_RETRIES)
                 )
                 NeutronClient().get().cosmo_delete_prefixed(self.name_prefix)
+                NeutronClient().get().cosmo_delete_tracked()
                 break
             except neutron_exceptions.NetworkInUseClient:
                 pass
@@ -281,6 +286,14 @@ class TestCase(unittest.TestCase):
                 'network_id': network['id']
             }
         })['subnet']
+
+    @with_neutron_client
+    def create_sg(self, name_suffix, neutron_client):
+        return neutron_client.create_security_group({
+            'security_group': {
+                'name': self.name_prefix + name_suffix,
+            }
+        })['security_group']
 
     @with_neutron_client
     def assertThereIsOneAndGet(self, obj_type_single, neutron_client, **kw):
