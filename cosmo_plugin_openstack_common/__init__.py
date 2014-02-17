@@ -307,3 +307,16 @@ class TestCase(unittest.TestCase):
     def assertThereIsNo(self, obj_type_single, neutron_client, **kw):
         objs = list(neutron_client.cosmo_list(obj_type_single, **kw))
         self.assertEquals(0, len(objs))
+
+    @with_nova_client
+    def assertThereIsOneServerAndGet(self, nova_client, **kw):
+        servers = nova_client.servers.findall(**kw)
+        self.assertEquals(1, len(servers))
+        return servers[0]
+
+    assertThereIsOneServer = assertThereIsOneServerAndGet
+
+    @with_nova_client
+    def assertThereIsNoServer(self, nova_client, **kw):
+        servers = nova_client.servers.findall(**kw)
+        self.assertEquals(0, len(servers))
