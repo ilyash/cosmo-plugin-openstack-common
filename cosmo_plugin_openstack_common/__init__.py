@@ -183,6 +183,11 @@ class NeutronClientWithSugar(neutron_client.Client):
                 "Expected exactly one external network but found {0}".format(
                     len(ls)))
 
+    def cosmo_is_network(self, id):
+        return bool(self.cosmo_list('network', id=id))
+
+    def cosmo_is_port(self, id):
+        return bool(self.cosmo_list('port', id=id))
 
 
 class TrackingNeutronClientWithSugar(NeutronClientWithSugar):
@@ -286,6 +291,15 @@ class TestCase(unittest.TestCase):
                 'network_id': network['id']
             }
         })['subnet']
+
+    @with_neutron_client
+    def create_port(self, name_suffix, network, neutron_client):
+        return neutron_client.create_port({
+            'port': {
+                'name': self.name_prefix + name_suffix,
+                'network_id': network['id']
+            }
+        })['port']
 
     @with_neutron_client
     def create_sg(self, name_suffix, neutron_client):
