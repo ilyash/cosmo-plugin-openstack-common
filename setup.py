@@ -1,4 +1,7 @@
 import setuptools
+
+# TODO: test_requires
+
 setuptools.setup(
     zip_safe=True,
     name='cosmo-plugin-openstack-common',
@@ -10,8 +13,9 @@ setuptools.setup(
     description='Common code for Cosmo OpenStack plugins',
     install_requires=[
         "cosmo-plugin-common",
-        "python-novaclient",
+        "python-keystoneclient",
         "python-neutronclient",
+        "python-novaclient",
     ],
     dependency_links=[
         "https://github.com/Fewbytes/cosmo-plugin-common/tarball/" \
